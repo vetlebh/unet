@@ -1,4 +1,5 @@
 import tensorflow as tf
+import numpy as np
 
 
 def iou(y_true: tf.Tensor, y_pred: tf.Tensor) -> float:
@@ -32,3 +33,30 @@ def iou(y_true: tf.Tensor, y_pred: tf.Tensor) -> float:
 
     # Return the mean IoU across the batch
     return tf.reduce_mean(ious)
+
+
+
+def get_metrics(model, X_test, y_test):
+
+    area = np.sum(y_test, axis=(1,2,3))
+    nonempty = area > 0
+
+    model.compile(
+                optimizer=model.optimizer,
+                loss=model.loss,
+                metrics=model.metrics + [
+                    "binary_accuracy",
+                    "FalseNegatives",
+                    "FalsePositives",
+                    "Precision",
+                    "Recall",
+                    iou
+                ],)
+
+    evaluation = model.evaluate(X_test[nonempty], y_test[nonempty])
+    metrics = {
+        name: value
+        for name, value
+        in zip(model.metrics_names, evaluation)
+                    }
+    return metrics

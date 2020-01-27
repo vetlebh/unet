@@ -23,6 +23,7 @@ from skimage.morphology import label
 from sklearn.model_selection import train_test_split
 
 from utils import iou
+from data_gen import data_gen
 
 from google.colab import files
 
@@ -37,7 +38,6 @@ drive.mount('/mntDrive')
 
 
 # Hyperparameters
-
 im_height = 256
 im_width = 256
 
@@ -58,68 +58,12 @@ test_size = 0.1
 val_size = 0.1
 random_state = 1
 
-max_slices = 15
 
-
-
-# Data Generator
-
-walk = next(os.walk(training_path))[1]
-
-X = np.zeros((len(walk)*max_slices, im_height, im_width, 1))
-y = np.zeros((len(walk)*max_slices, im_height, im_width, 1))
-
-img_nr = 0
-sum_slices = 0
-patients_not_found = 0
-for ids in walk:
-
-    try:
-        img = np.load(os.path.join(training_path, ids, img_name))
-        gt = np.load(os.path.join(training_path, ids, gt_name))
-        slices = img.shape[2]
-
-        for slice_nr in range(slices):
-
-            img_slice, gt_slice = img[:, :, slice_nr], gt[:, :, slice_nr]
-            img_resized = resize(img_slice, (im_height, im_width, 1), mode = 'edge', preserve_range = True, anti_aliasing=True)
-            gt_resized = resize(gt_slice, (im_height, im_width, 1), mode = 'edge', preserve_range = True, anti_aliasing=True)
-
-            # We are only interested in the classes 'heart' and 'background' for this experiment
-            gt_resized = (gt_resized > 0.5).astype(np.uint8)
-
-            X[sum_slices, :, :, :] = img_resized/255.0
-            y[sum_slices, :, :, :] = gt_resized
-
-            sum_slices +=1
-
-    except:
-        print(f'{ids} not found')
-        patients_not_found += 1
-        continue
-
-    if(img_nr%10 == 0):
-        print(f'{img_nr} images and {sum_slices} slices loaded to array')
-    img_nr += 1
-print(f'Image load complete. {img_nr} images and {sum_slices} slices loaded successfully. ')
-
-X, y = X[:sum_slices, :, :, :], y[:sum_slices, :, :, :]
-print(X.shape, y.shape)
-print(np.unique(y))
-
-# Split train data and test data
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=random_state)
-
-# Split train data into train and valid
-X_train, X_valid, y_train, y_valid = train_test_split(X_train, y_train, test_size=val_size, random_state=random_state)
-
-print(f'Training size: {X_train.shape[0]}, Validation size: {X_valid.shape[0]}, Test size: {X_test.shape[0]}')
-
-
+# Get data
+X_train, X_valid, X_test, y_train, y_valid, y_test = data_gen(training_path, img_name, gt_name)
 
 
 # Model
-
 def conv2d_block(input_tensor, n_filters, kernel_size = 3, batchnorm = True):
     """Function to add 2 convolutional layers with the parameters passed to it"""
     # first layer
@@ -135,11 +79,11 @@ def conv2d_block(input_tensor, n_filters, kernel_size = 3, batchnorm = True):
     if batchnorm:
         x = BatchNormalization()(x)
     x = Activation('relu')(x)
-
     return x
 
 
 def get_unet(input_img, n_filters = 16, dropout = 0.1, batchnorm = True):
+
     # Contracting Path
     c1 = conv2d_block(input_img, n_filters * 1, kernel_size = 3, batchnorm = batchnorm)
     p1 = MaxPooling2D((2, 2))(c1)
@@ -192,15 +136,12 @@ model = get_unet(input_img, n_filters=16, dropout=0.05, batchnorm=True)
 model.compile(optimizer=Adam(), loss="binary_crossentropy", metrics=["accuracy"])
 
 
-
 # Evaluate the model pre training
 loss, acc = model.evaluate(X_test,  y_test, verbose=2)
 print("Untrained model, accuracy: {:5.2f}%".format(100*acc))
 
 
-
 # Train
-
 callbacks = [
     EarlyStopping(patience=10, verbose=1),
     ReduceLROnPlateau(factor=0.1, patience=5, min_lr=0.00001, verbose=1),
@@ -210,57 +151,12 @@ callbacks = [
 results = model.fit(X_train, y_train, batch_size=batch_size, epochs=epochs, callbacks=callbacks, validation_data=(X_valid, y_valid))
 
 
-
-
+# Load best weights
 model.load_weights(checkpoint_path)
-files.download(checkpoint_path)
 model.save(model_path)
-files.download(model_path)
 
-with open(save_history_path, 'wb') as file_pi:
-        pickle.dump(results.history, file_pi)
+# Calculate metrics on best weights
+metrics = get_metrics(model, X_test, y_test)
 
-files.download(save_history_path)
-
-area = np.sum(y_test, axis=(1,2,3))
-nonempty = area > 0
-
-model.compile(
-            optimizer=model.optimizer,
-            loss=model.loss,
-            metrics=model.metrics + [
-                "binary_accuracy",
-                "FalseNegatives",
-                "FalsePositives",
-                "Precision",
-                "Recall",
-                iou
-            ],)
-
-evaluation = model.evaluate(X_test[nonempty], y_test[nonempty])
-metrics = {
-    name: value
-    for name, value
-    in zip(model.metrics_names, evaluation)
-                }
-
-metrics
-
-with open(save_metrics_path, 'wb') as file_pi:
-        pickle.dump(metrics, file_pi, protocol=2)
-
-files.download(save_metrics_path)
-
-#model.summary()
-
-"""Evaluate"""
-
-model.load_weights(checkpoint_path)
 # Evaluate the model post training
-loss, acc = model.evaluate(X_test,  y_test, verbose=2)
-print("Trained model, accuracy: {:5.2f}%".format(100*acc))
-
-model.save(model_path)
-
-with open(save_history_path, 'wb') as file_pi:
-        pickle.dump(results.history, file_pi)
+print(f"Trained model, metrics: {metrics}")
